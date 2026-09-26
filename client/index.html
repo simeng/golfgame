@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>golfgame — gravity minigolf</title>
+    <style>
+      html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: #05070d; }
+      canvas#game { display: block; touch-action: none; }
+      #hud {
+        position: fixed; top: 10px; left: 12px;
+        font: 13px/1.4 monospace; color: rgba(200,225,205,0.85);
+        pointer-events: none; user-select: none; white-space: pre;
+      }
+      #help {
+        position: fixed; bottom: 10px; left: 12px;
+        font: 12px/1.5 monospace; color: rgba(160,185,170,0.55);
+        pointer-events: none; user-select: none;
+      }
+      #banner {
+        position: fixed; top: 18%; left: 50%; transform: translateX(-50%);
+        display: none; flex-direction: column; align-items: center; gap: 14px;
+        font: 700 40px/1.2 monospace; color: #ffe9a0; letter-spacing: 2px;
+        text-shadow: 0 2px 18px rgba(0,0,0,0.8);
+        pointer-events: none; z-index: 6;
+      }
+      #banner.show { display: flex; pointer-events: auto; }
+      #banner button {
+        font: 700 14px monospace; letter-spacing: 2px; padding: 10px 26px;
+        background: #2b7a4b; color: white; border: none; border-radius: 6px; cursor: pointer;
+      }
+      #banner button:hover { background: #35935e; }
+      #overlay {
+        position: fixed; inset: 0; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 14px;
+        background: radial-gradient(ellipse at center, rgba(6,20,12,0.88), rgba(3,8,6,0.97));
+        z-index: 10;
+      }
+      #overlay h1 {
+        font: 700 42px/1 monospace; color: #d8ffe8; letter-spacing: 6px; margin: 0;
+      }
+      #overlay p.sub { font: 13px monospace; color: rgba(170,215,190,0.85); margin: 0 0 8px; max-width: 520px; text-align: center; line-height: 1.7; }
+      #overlay input {
+        font: 15px monospace; padding: 9px 12px; width: 240px;
+        background: rgba(12,32,22,0.8); color: #d8ffe8;
+        border: 1px solid rgba(110,190,140,0.4); border-radius: 6px; outline: none;
+      }
+      #overlay button {
+        font: 700 15px monospace; letter-spacing: 2px; padding: 10px 34px;
+        background: #2b7a4b; color: white; border: none; border-radius: 6px; cursor: pointer;
+      }
+      #overlay button:hover { background: #35935e; }
+      #overlay-msg { font: 12px monospace; color: #ffab8a; min-height: 16px; }
+    </style>
+  </head>
+  <body>
+    <canvas id="game"></canvas>
+    <div id="hud"></div>
+    <div id="help">drag from anywhere to aim (slingshot) · release to hit · planets pull hardest right after the strike, then fade to zero · R = re-tee</div>
+    <div id="banner">
+      <span id="banner-text"></span>
+      <button id="retee-btn">PLAY AGAIN (R)</button>
+    </div>
+    <div id="overlay">
+      <h1>GOLFGAME</h1>
+      <p class="sub">
+        Top-down minigolf with fading gravity. Every shot starts with planets at
+        full pull, which fades to zero as the ball covers half the distance it
+        would have rolled without them — so gravity bends your drive, but never
+        your putt. Server-authoritative physics on SpacetimeDB @ 20 Hz.
+      </p>
+      <input id="name" maxlength="16" spellcheck="false" />
+      <button id="launch">TEE OFF</button>
+      <div id="overlay-msg"></div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

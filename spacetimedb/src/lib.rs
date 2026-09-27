@@ -43,7 +43,7 @@ pub const DEFAULT_TEE_Y: f64 = 450.0;
 // ---------------------------------------------------------------------------
 
 const FRICTION: f64 = 120.0; // constant rolling deceleration, px/s^2
-const G_GOLF: f64 = 3000.0; // gravity constant, accel = G_GOLF * r^2 / d^2 * gmult
+const G_GOLF: f64 = 4500.0; // gravity constant, accel = G_GOLF * r^2 / d^2 * gmult
 const MIN_D: f64 = 26.0; // clamp on gravity distance (avoids the singularity)
 const REST: f64 = 0.86; // planet bounce restitution
 const MAX_SHOT: f64 = 700.0; // max initial speed, px/s

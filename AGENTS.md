@@ -94,9 +94,9 @@ cd client && npm run dev             # http://localhost:5173
 ## THE invariant (most important thing in this repo)
 
 **`client/src/world.ts` must reproduce the server op-for-op: physics AND
-course generation.** The client predicts its own ball locally at 60 fps (exact
-substeps of `SUB_DT = 0.05/8`), draws the aim trajectory with the same code,
-and generates the identical course from `(seed, hole_idx)` that the server uses:
+course generation.** The client keeps the ball in sync from server rows (see
+reconciliation below), and generates the identical course from
+`(seed, hole_idx)` that the server uses:
 
 - Same constants, same **order of operations** (gravity → friction → integrate;
   then boundary → planets → hole check → settle check).
@@ -112,6 +112,17 @@ and generates the identical course from `(seed, hole_idx)` that the server uses:
   rejection loop), same acceptance predicates. Reorder ONE draw and every
   subsequent planet changes.
 - If you add a physics effect on one side, add it to the other in the same tick.
+
+**The aim guide is deliberately NOT a prediction** (tuned 2026-09-27 with the
+player: a full-fidelity preview showed the exact stop point → zero
+challenge). `previewShot` runs the SAME friction/collision/capture code with
+gravity switched off — it shows the naive straight path where the ball would
+stop if no planet pulled. Amber = the segment where the real shot is still
+being pulled away from the line, white = after the pull ends (real ball then
+travels straight, offset by the bend). `previewShot` is client-only and must
+NEVER be used for prediction/reconciliation — that uses `simulateShot`
+(the exact mirror, still validated bit-for-bit by the smoke test) and server
+rows.
 
 Reconciliation behavior (main.ts): own ball lerp 50% toward each server row,
 hard-snap when >40 px; the authoritative `shotAge` (drives the gravity fade)
@@ -138,11 +149,11 @@ Fading gravity, exactly as specified by the player:
 Tuning intent:
 
 - `FRICTION = 120`: full-power shot (700 px/s) stops in ~5.8 s / ~2041 px.
-- `G_GOLF = 3000` (tuned 2026-09-27: 500 was a visual non-effect — drives
-  bent ~30 px; at 3000 they bend ~170 px and the peak pull reaches ~4×
-  friction), planet `mass ∝ r²`: a 700 px/s ball grazing a 50 px planet at
-  100 px gets pulled hard early in the shot; near `t_half` the same flyby does
-  almost nothing.
+- `G_GOLF = 4500` (tuned 2026-09-27 in two steps: 500 was a visual
+  non-effect — drives bent ~30 px; 3000 felt close but the player wanted more;
+  at 4500 drives bend ~260 px and the peak pull reaches ~6× friction), planet
+  `mass ∝ r²`: a 700 px/s ball grazing a 50 px planet at 100 px gets pulled
+  hard early in the shot; near `t_half` the same flyby does almost nothing.
 - `REST = 0.86` wall & planet bounce.
 - `CAPTURE_SPEED = 100`: fast balls roll **over** the cup (real golf).
 - **Settle only when `gmult == 0` AND speed < `SETTLE_EPS = 2 px/s`** — while

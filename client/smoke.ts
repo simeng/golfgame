@@ -13,6 +13,7 @@ import {
   GEN_MARGIN,
   generateHole,
   MAX_SHOT,
+  MIN_SHOT,
   pointSegDist,
   simulateShot,
   straightDrivePower,
@@ -129,12 +130,33 @@ else fail("tee balls overlap exactly");
   else fail(`tee/cup too close: ${dTee.toFixed(0)}/${dCup.toFixed(0)}`);
 }
 
-// helper: putt at the cup until it drops (max 8 shots). Re-reads the round
-// after every settle so it always aims at the CURRENT hole's cup. Short
-// approaches cross the cup (~12px overshoot) so the ball always enters the
-// capture radius at a controlled ~80 px/s (< CAPTURE_SPEED) → guaranteed drop.
+// Strong gravity bends even short putts around planets, so blind "aim at the
+// cup" no longer works. Instead, for approaches < 400px we SEARCH for a shot
+// that drops: candidates are graded by the EXACT client mirror (bit-for-bit
+// the server's physics, validated by the mirror test), and the first candidate
+// that simulates as holed is guaranteed to hole out on the server.
+function findFinishShot(bx: number, by: number, hole: ReturnType<typeof generateHole>): { dx: number; dy: number; power: number } | null {
+  const d = Math.hypot(hole.cup.x - bx, hole.cup.y - by);
+  const baseAng = Math.atan2(hole.cup.y - by, hole.cup.x - bx);
+  const powers: number[] = [];
+  for (const m of [0.8, 0.9, 1.0, 1.1, 1.25, 1.5]) {
+    const p = straightDrivePower(d) * m;
+    if (p >= MIN_SHOT && p <= MAX_SHOT) powers.push(p);
+  }
+  for (const extra of [40, 60, 90]) powers.push(extra);
+  for (const offDeg of [0, -8, 8, -16, 16, -24, 24, -32, 32]) {
+    for (const power of powers) {
+      const ang = baseAng + (offDeg * Math.PI) / 180;
+      const sim = simulateShot(bx, by, Math.cos(ang) * power, Math.sin(ang) * power, estimateTHalf(power), hole, 12, 8);
+      if (sim.holed) return { dx: Math.cos(ang), dy: Math.sin(ang), power };
+    }
+  }
+  return null;
+}
+// helper: putt at the cup until it drops (max 10 shots). Re-reads the round
+// after every settle so it always aims at the CURRENT hole's cup.
 async function puttUntilIn(conn: ReturnType<typeof makeConn>, tag: string, seed: number): Promise<boolean> {
-  for (let shot = 0; shot < 8; shot++) {
+  for (let shot = 0; shot < 10; shot++) {
     // wait for the ball to be ready (or holed)
     const r = await waitRow(conn, (q) => q.ballState === 0 || q.ballState === 2, 20000);
     if (!r) return false;
@@ -142,10 +164,16 @@ async function puttUntilIn(conn: ReturnType<typeof makeConn>, tag: string, seed:
     const rr = conn.db.db.round.id.find(0);
     if (!rr) return false;
     const hole = generateHole(seed, rr.holeIdx);
-    const dx = hole.cup.x - r.x;
-    const dy = hole.cup.y - r.y;
-    const d = Math.hypot(dx, dy);
-    const power = d > 250 ? straightDrivePower(d) : straightDrivePower(d + 12);
+    const cdx = hole.cup.x - r.x;
+    const cdy = hole.cup.y - r.y;
+    const d = Math.hypot(cdx, cdy);
+    let aim: { dx: number; dy: number; power: number };
+    if (d > 400) {
+      aim = { dx: cdx / d, dy: cdy / d, power: straightDrivePower(d) };
+    } else {
+      aim = findFinishShot(r.x, r.y, hole) ?? { dx: cdx / d, dy: cdy / d, power: straightDrivePower(d + 12) };
+    }
+    const { dx, dy, power } = aim;
     const since = conn.rows.length; // keep history (the advance-reset row must survive)
     try {
       await conn.db.reducers.hit({ dx, dy, power });

@@ -19,7 +19,7 @@ import {
   MAX_SHOT,
   MIN_SHOT,
   SETTLE_EPS,
-  simulateShot,
+  previewShot,
   speed,
   straightDrivePower,
   SUB_DT,
@@ -721,7 +721,12 @@ function drawAim(): void {
   lastAim = { dx, dy, power };
 
   const tHalf = estimateTHalf(power);
-  const sim = simulateShot(b.x, b.y, dx * power, dy * power, tHalf, hole, 8, 4);
+  // naive guide: the gravity-free path (where the ball WOULD stop if no
+  // planet pulled). It deliberately does NOT predict the bend — that's the
+  // player's job. Amber = the flight segment where the real ball is still
+  // being pulled away from this line; white = after the pull ends, the real
+  // ball travels straight (offset by the accumulated bend).
+  const sim = previewShot(b.x, b.y, dx * power, dy * power, hole, 8, 4);
 
   // pull band
   ctx.strokeStyle = "rgba(255,255,255,0.25)";
@@ -733,7 +738,8 @@ function drawAim(): void {
   ctx.stroke();
   ctx.setLineDash([]);
 
-  // predicted path: amber while gravity is active, white after the fade
+  // naive (gravity-free) path: amber while the real shot is still pulled,
+  // white once the pull has faded
   ctx.lineWidth = 2.5;
   for (let i = 0; i < sim.pts.length - 1; i++) {
     const p0 = sim.pts[i];
@@ -759,7 +765,7 @@ function drawAim(): void {
   ctx.fillStyle = "rgba(255,190,80,0.9)";
   ctx.font = "10px monospace";
   ctx.textAlign = "center";
-  ctx.fillText("gravity fades", sx(fadePt.x), sy(fadePt.y) - 12);
+  ctx.fillText("pull ends", sx(fadePt.x), sy(fadePt.y) - 12);
 
   // power meter + straight-drive hint
   const px = sx(b.x);

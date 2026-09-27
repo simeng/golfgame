@@ -15,7 +15,7 @@ export const DEFAULT_TEE_Y = 450.0;
 // --- physics constants (mirror lib.rs) -------------------------------------
 
 export const FRICTION = 120.0; // constant rolling deceleration, px/s^2
-const G_GOLF = 3000.0;
+const G_GOLF = 4500.0;
 const MIN_D = 26.0;
 const REST = 0.86;
 export const MAX_SHOT = 700.0;
@@ -346,6 +346,77 @@ export function simulateShot(
     }
     const gmult = Math.max(0.0, 1.0 - b.age / b.tHalf);
     if (gmult <= 0.0 && speed(b) < SETTLE_EPS) {
+      b.vx = 0.0;
+      b.vy = 0.0;
+      settled = true;
+      break;
+    }
+  }
+  return { pts, holed, settled, endAge: b.age };
+}
+
+/**
+ * Preview-only substep: same friction + collisions + cup capture as the
+ * server, but WITHOUT gravity. Used ONLY by the aim guide — it shows the
+ * naive gravity-free path, so the player has to account for the planets'
+ * pull themselves (a full-fidelity preview made the game trivial).
+ * Prediction/reconciliation keeps using the exact mirror (simulateShot).
+ */
+function previewSubstep(b: Ball, hole: Hole): boolean {
+  b.age += SUB_DT;
+  // constant rolling friction (identical arithmetic to step_ball)
+  const sp = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
+  if (sp > 0.0) {
+    const decel = FRICTION * SUB_DT;
+    if (decel >= sp) {
+      b.vx = 0.0;
+      b.vy = 0.0;
+    } else {
+      const k = (sp - decel) / sp;
+      b.vx *= k;
+      b.vy *= k;
+    }
+  }
+  b.x += b.vx * SUB_DT;
+  b.y += b.vy * SUB_DT;
+  collideBoundary(b);
+  for (const p of hole.planets) collidePlanet(b, p);
+  const hdx = b.x - hole.cup.x;
+  const hdy = b.y - hole.cup.y;
+  const hd = Math.sqrt(hdx * hdx + hdy * hdy);
+  if (hd < HOLE_R && speed(b) < CAPTURE_SPEED) {
+    b.x = hole.cup.x;
+    b.y = hole.cup.y;
+    b.vx = 0.0;
+    b.vy = 0.0;
+    return true;
+  }
+  return false;
+}
+
+/** Gravity-free shot path for the aim guide (see previewSubstep). */
+export function previewShot(
+  x: number,
+  y: number,
+  vx: number,
+  vy: number,
+  hole: Hole,
+  maxSeconds: number,
+  sampleEvery: number,
+): ShotSim {
+  const b: Ball = { x, y, vx, vy, age: 0, tHalf: 0 };
+  const pts: ShotSim["pts"] = [{ x, y, age: 0 }];
+  const maxSteps = Math.ceil(maxSeconds / SUB_DT);
+  let holed = false;
+  let settled = false;
+  for (let k = 0; k < maxSteps; k++) {
+    const wasHoled = previewSubstep(b, hole);
+    if (k % sampleEvery === 0) pts.push({ x: b.x, y: b.y, age: b.age });
+    if (wasHoled) {
+      holed = true;
+      break;
+    }
+    if (speed(b) < SETTLE_EPS) {
       b.vx = 0.0;
       b.vy = 0.0;
       settled = true;

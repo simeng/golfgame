@@ -29,14 +29,27 @@ export const Player = __t.object("Player", {
   y: __t.f64(),
   vx: __t.f64(),
   vy: __t.f64(),
-  state: __t.u8(),
-  strokes: __t.u32(),
+  ballState: __t.u8(),
   shotAge: __t.f64(),
   tHalf: __t.f64(),
+  phase: __t.u8(),
+  hole: __t.u8(),
+  strokes: __t.u32(),
+  totalStrokes: __t.u32(),
+  courseChoice: __t.u8(),
   connected: __t.bool(),
   offlineSinceTick: __t.u64(),
 });
 export type Player = __Infer<typeof Player>;
+
+export const Round = __t.object("Round", {
+  id: __t.u32(),
+  phase: __t.u8(),
+  seed: __t.u32(),
+  holes: __t.u8(),
+  holeIdx: __t.u8(),
+});
+export type Round = __Infer<typeof Round>;
 
 export const TickTimer = __t.object("TickTimer", {
   scheduledId: __t.u64(),

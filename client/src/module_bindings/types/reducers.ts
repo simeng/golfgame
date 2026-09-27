@@ -7,10 +7,16 @@ import { type Infer as __Infer } from "spacetimedb";
 
 // Import all reducer arg schemas
 import HitReducer from "../hit_reducer";
+import PickCourseReducer from "../pick_course_reducer";
 import ReteeReducer from "../retee_reducer";
 import SpawnReducer from "../spawn_reducer";
+import StartMatchReducer from "../start_match_reducer";
+import ToLobbyReducer from "../to_lobby_reducer";
 
 export type HitParams = __Infer<typeof HitReducer>;
+export type PickCourseParams = __Infer<typeof PickCourseReducer>;
 export type ReteeParams = __Infer<typeof ReteeReducer>;
 export type SpawnParams = __Infer<typeof SpawnReducer>;
+export type StartMatchParams = __Infer<typeof StartMatchReducer>;
+export type ToLobbyParams = __Infer<typeof ToLobbyReducer>;
 

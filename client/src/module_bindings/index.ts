@@ -35,13 +35,17 @@ import {
 
 // Import all reducer arg schemas
 import HitReducer from "./hit_reducer";
+import PickCourseReducer from "./pick_course_reducer";
 import ReteeReducer from "./retee_reducer";
 import SpawnReducer from "./spawn_reducer";
+import StartMatchReducer from "./start_match_reducer";
+import ToLobbyReducer from "./to_lobby_reducer";
 
 // Import all procedure arg schemas
 
 // Import all table schema definitions
 import PlayerRow from "./player_table";
+import RoundRow from "./round_table";
 
 /** Type-only namespace exports for generated type groups. */
 
@@ -58,13 +62,27 @@ const tablesSchema = __schema({
       { name: 'player_identity_key', constraint: 'unique', columns: ['identity'] },
     ],
   }, PlayerRow),
+  round: __table({
+    name: 'round',
+    indexes: [
+      { accessor: 'id', name: 'round_id_idx_btree', algorithm: 'btree', columns: [
+        'id',
+      ] },
+    ],
+    constraints: [
+      { name: 'round_id_key', constraint: 'unique', columns: ['id'] },
+    ],
+  }, RoundRow),
 });
 
 /** The schema information for all reducers in this module. This is defined the same way as the reducers would have been defined in the server, except the body of the reducer is omitted in code generation. */
 const reducersSchema = __reducers(
   __reducerSchema("hit", HitReducer),
+  __reducerSchema("pick_course", PickCourseReducer),
   __reducerSchema("retee", ReteeReducer),
   __reducerSchema("spawn", SpawnReducer),
+  __reducerSchema("start_match", StartMatchReducer),
+  __reducerSchema("to_lobby", ToLobbyReducer),
 );
 
 /** The schema information for all procedures in this module. This is defined the same way as the procedures would have been defined in the server. */

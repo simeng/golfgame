@@ -1,29 +1,29 @@
 import { DbConnection } from "./module_bindings";
 import PlayerRowSchema from "./module_bindings/player_table";
+import RoundRowSchema from "./module_bindings/round_table";
 import { Identity, Infer } from "spacetimedb";
 
 type PlayerRow = Infer<typeof PlayerRowSchema>;
+type RoundRow = Infer<typeof RoundRowSchema>;
 import {
   BALL_R,
   Ball,
+  DEFAULT_TEE_X,
+  DEFAULT_TEE_Y,
   estimateTHalf,
   fullSubstep,
+  generateHole,
+  Hole,
   HOLE_R,
-  HOLE_X,
-  HOLE_Y,
+  holePar,
   MAX_SHOT,
   MIN_SHOT,
-  PAR,
-  Planet,
-  PLANETS,
   SETTLE_EPS,
   simulateShot,
   speed,
+  straightDrivePower,
   SUB_DT,
-  TEE_X,
-  TEE_Y,
-  Wall,
-  WALLS,
+  Vec2,
   WORLD_H,
   WORLD_W,
 } from "./world";
@@ -37,7 +37,7 @@ const DB_NAME = "golfgame";
 
 // ---------------------------------------------------------------------------
 // Persistent identity: localStorage token so a reload rejoins as the same
-// player (same ball if still inside the 30 s grace period).
+// player (same ball + same round if still inside the 30 s grace period).
 // ---------------------------------------------------------------------------
 
 const HOST_KEY = new URL(WS_URL).host.replace(/[^a-z0-9.]/gi, "_");
@@ -92,20 +92,19 @@ interface Snap<T> {
   tCurr: number;
 }
 
-const players = new Map<string, Snap<PlayerRow>>(); // other players (interpolated)
+const playerRows = new Map<string, PlayerRow>(); // all players (latest rows, incl. me)
+const snaps = new Map<string, Snap<PlayerRow>>(); // interpolation snapshots for others
+
+// round + course
+let round: RoundRow = { id: 0, phase: 0, seed: 0, holes: 0, holeIdx: 0 };
+let hole: Hole | null = null;
+let holeKey = "";
 
 // my ball: fully predicted locally with the exact server physics
-// state mirrors the server: 0 ready, 1 rolling, 2 holed
-const myState = {
-  state: 0 as 0 | 1 | 2,
-  strokes: 0,
+const myBall = {
+  state: 0 as 0 | 1 | 2, // ball_state: 0 ready, 1 rolling, 2 holed
   ball: null as Ball | null,
 };
-
-function setMyState(s: 0 | 1 | 2): void {
-  if (s === 2 && myState.state !== 2) showHoleBanner();
-  myState.state = s;
-}
 let myIdentityHex: string | null = null;
 let meId: string | null = null;
 let myName = "";
@@ -122,33 +121,33 @@ const INTERP_DELAY = 100;
 function pid(row: PlayerRow): string {
   return (row.identity as Identity).toHexString();
 }
-
 function isMine(p: PlayerRow): boolean {
   return pid(p) === myIdentityHex;
+}
+function myRow(): PlayerRow | null {
+  return myIdentityHex ? playerRows.get(myIdentityHex) ?? null : null;
 }
 
 /**
  * Reconcile the locally predicted ball with a server row. Position/velocity
- * lerp 50%, hard-snap when far off; the authoritative age (which drives the
- * gravity fade) is lerped with a snap guard.
+ * lerp 50%, hard-snap when far off; the authoritative age (drives the gravity
+ * fade) lerps with a snap guard.
  */
 function adoptBall(p: PlayerRow): void {
-  setMyState(p.state as 0 | 1 | 2);
-  myState.strokes = p.strokes;
-  if (p.state === 1) {
-    if (!myState.ball) {
-      // first time seeing this ball (spawn or rejoin mid-roll)
-      myState.ball = {
-        x: p.x, y: p.y, vx: p.vx, vy: p.vy,
-        age: p.shotAge, tHalf: p.tHalf,
-      };
+  myBall.state = p.ballState as 0 | 1 | 2;
+  if (p.ballState === 1) {
+    if (!myBall.ball) {
+      myBall.ball = { x: p.x, y: p.y, vx: p.vx, vy: p.vy, age: p.shotAge, tHalf: p.tHalf };
       return;
     }
-    const b = myState.ball;
+    const b = myBall.ball;
     const ex = p.x - b.x;
     const ey = p.y - b.y;
     if (ex * ex + ey * ey > 40 * 40) {
-      b.x = p.x; b.y = p.y; b.vx = p.vx; b.vy = p.vy;
+      b.x = p.x;
+      b.y = p.y;
+      b.vx = p.vx;
+      b.vy = p.vy;
     } else {
       b.x += ex * 0.5;
       b.y += ey * 0.5;
@@ -161,10 +160,7 @@ function adoptBall(p: PlayerRow): void {
     if (Math.abs(p.tHalf - b.tHalf) > 1e-9) b.tHalf = p.tHalf;
   } else {
     // settled or holed: adopt server state exactly, stop predicting
-    myState.ball = {
-      x: p.x, y: p.y, vx: 0, vy: 0,
-      age: 0, tHalf: 0,
-    };
+    myBall.ball = { x: p.x, y: p.y, vx: 0, vy: 0, age: 0, tHalf: 0 };
   }
 }
 
@@ -173,10 +169,14 @@ function applyPlayerInsert(p: PlayerRow): void {
   if (isMine(p)) {
     meId = pid(p);
     myName = p.name;
+    playerRows.set(meId, p);
     adoptBall(p);
+    setOverlay(false);
   } else {
-    players.set(pid(p), { prev: null, curr: p, tPrev: now, tCurr: now });
+    playerRows.set(pid(p), p);
+    snaps.set(pid(p), { prev: null, curr: p, tPrev: now, tCurr: now });
   }
+  updatePanels();
 }
 
 function applyPlayerUpdate(_old: PlayerRow, p: PlayerRow): void {
@@ -186,32 +186,53 @@ function applyPlayerUpdate(_old: PlayerRow, p: PlayerRow): void {
       meId = id;
       myName = p.name;
     }
+    playerRows.set(id, p);
     adoptBall(p);
-    return;
-  }
-  const s = players.get(id);
-  const now = performance.now();
-  if (s) {
-    s.prev = s.curr;
-    s.tPrev = s.tCurr;
-    s.curr = p;
-    s.tCurr = now;
   } else {
-    players.set(id, { prev: null, curr: p, tPrev: now, tCurr: now });
+    playerRows.set(id, p);
+    const s = snaps.get(id);
+    const now = performance.now();
+    if (s) {
+      s.prev = s.curr;
+      s.tPrev = s.tCurr;
+      s.curr = p;
+      s.tCurr = now;
+    } else {
+      snaps.set(id, { prev: null, curr: p, tPrev: now, tCurr: now });
+    }
   }
+  updatePanels();
 }
 
 function applyPlayerDelete(row: PlayerRow): void {
   const id = pid(row);
+  playerRows.delete(id);
+  snaps.delete(id);
   if (id === meId) {
     // server removed us (grace expired)
     meId = null;
-    myState.ball = null;
-    myState.state = 0;
+    myBall.ball = null;
+    myBall.state = 0;
     setOverlay(true);
     setOverlayMsg("Your round was cleared (30 s away). Tee off again!");
   }
-  players.delete(id);
+  updatePanels();
+}
+
+function applyRound(r: RoundRow): void {
+  const key = `${r.seed}:${r.holeIdx}`;
+  round = r;
+  if (r.phase === 1) {
+    if (key !== holeKey) {
+      holeKey = key;
+      hole = generateHole(r.seed, r.holeIdx);
+      flashHole(`HOLE ${r.holeIdx + 1} / ${r.holes}`);
+    }
+  } else if (r.phase === 0) {
+    hole = null;
+    holeKey = "";
+  }
+  updatePanels();
 }
 
 /** After the subscription snapshot lands, check whether we have a ball to rejoin. */
@@ -220,11 +241,10 @@ async function tryRejoin(): Promise<void> {
   try {
     const row = db.db.player.identity.find(new Identity(myIdentityHex));
     if (row) {
-      myName = row.name;
+      myName = (row as PlayerRow).name;
       applyPlayerInsert(row as PlayerRow);
       persistIdentity();
-      setOverlay(false);
-      console.log("rejoined round as", myName);
+      console.log("rejoined as", myName, "phase", (row as PlayerRow).phase);
     }
   } catch (e) {
     console.warn("rejoin lookup failed", e);
@@ -240,7 +260,6 @@ async function doSpawn(): Promise<void> {
     await db.reducers.spawn({ name: myName });
     persistIdentity(); // remember this identity for the next visit
     localStorage.setItem(LS_NAME, myName);
-    setOverlay(false);
   } catch (e) {
     console.error(e);
     setOverlayMsg("Tee-off failed: " + String(e));
@@ -251,13 +270,13 @@ async function sendHit(dx: number, dy: number, power: number): Promise<void> {
   try {
     await db.reducers.hit({ dx, dy, power });
     // optimistic local state so prediction starts on this very frame
-    if (myState.ball) {
-      myState.ball.vx = (dx / Math.hypot(dx, dy)) * power;
-      myState.ball.vy = (dy / Math.hypot(dx, dy)) * power;
-      myState.ball.age = 0;
-      myState.ball.tHalf = estimateTHalf(power);
-      setMyState(1);
-      myState.strokes += 1;
+    if (myBall.ball) {
+      const d = Math.hypot(dx, dy);
+      myBall.ball.vx = (dx / d) * power;
+      myBall.ball.vy = (dy / d) * power;
+      myBall.ball.age = 0;
+      myBall.ball.tHalf = estimateTHalf(power);
+      myBall.state = 1;
     }
   } catch (e) {
     console.warn("hit failed", e);
@@ -271,17 +290,50 @@ async function sendRetee(): Promise<void> {
     console.warn("retee failed", e);
   }
 }
+async function sendPickCourse(holes: number): Promise<void> {
+  try {
+    await db.reducers.pickCourse({ holes });
+  } catch (e) {
+    console.warn("pickCourse failed", e);
+  }
+}
+async function sendStart(): Promise<void> {
+  try {
+    await db.reducers.startMatch({});
+  } catch (e) {
+    console.warn("startMatch failed", e);
+  }
+}
+async function sendToLobby(): Promise<void> {
+  try {
+    await db.reducers.toLobby({});
+  } catch (e) {
+    console.warn("toLobby failed", e);
+  }
+}
 
 // ---------------------------------------------------------------------------
-// HUD / overlay
+// HUD / panels
 // ---------------------------------------------------------------------------
 
 const overlay = document.getElementById("overlay")!;
 const overlayMsg = document.getElementById("overlay-msg")!;
 const nameInput = document.getElementById("name") as HTMLInputElement;
 const hud = document.getElementById("hud")!;
-const banner = document.getElementById("banner")!;
-const bannerText = document.getElementById("banner-text")!;
+const lobbyEl = document.getElementById("lobby")!;
+const lobbyPlayers = document.getElementById("lobby-players")!;
+const lobbyCount = document.getElementById("lobby-count")!;
+const lobbyStart = document.getElementById("lobby-start") as HTMLButtonElement;
+const lobbyNote = document.getElementById("lobby-note")!;
+const pick8 = document.getElementById("pick-8") as HTMLButtonElement;
+const pick16 = document.getElementById("pick-16") as HTMLButtonElement;
+const scoreboardEl = document.getElementById("scoreboard")!;
+const scoreboardTitle = document.getElementById("scoreboard-title")!;
+const scoreboardRows = document.getElementById("scoreboard-rows")!;
+const finishedEl = document.getElementById("finished")!;
+const finishedRows = document.getElementById("finished-rows")!;
+const chip = document.getElementById("chip")!;
+const holecard = document.getElementById("holecard")!;
 
 function setOverlay(show: boolean): void {
   overlay.style.display = show ? "flex" : "none";
@@ -289,17 +341,171 @@ function setOverlay(show: boolean): void {
 function setOverlayMsg(msg: string): void {
   overlayMsg.textContent = msg;
 }
-function showHoleBanner(): void {
-  const s = myState.strokes;
-  const diff = s - PAR;
-  const label =
-    diff < 0 ? `${s} — ${-diff} under par! 🏆` : diff === 0 ? `${s} — exactly par!` : `${s} — ${diff} over par`;
-  bannerText.textContent = `HOLE IN ${label}`;
-  banner.classList.add("show");
+
+let holecardTimer = 0;
+function flashHole(text: string): void {
+  holecard.textContent = text;
+  holecard.classList.remove("show");
+  void holecard.offsetWidth; // restart the CSS animation
+  holecard.classList.add("show");
+  clearTimeout(holecardTimer);
+  holecardTimer = window.setTimeout(() => holecard.classList.remove("show"), 1600);
 }
 
-nameInput.value =
-  localStorage.getItem(LS_NAME) || "golfer-" + Math.floor(Math.random() * 900 + 100);
+function majorityHoles(): number {
+  let n8 = 0;
+  let n16 = 0;
+  for (const p of playerRows.values()) {
+    if (p.courseChoice === 1) n16++;
+    else n8++;
+  }
+  return n16 > n8 ? 16 : 8;
+}
+
+function ballColor(hex: string): string {
+  const palette: Array<[number, number, number]> = [
+    [255, 150, 120],
+    [120, 200, 255],
+    [170, 230, 130],
+    [230, 180, 250],
+    [250, 220, 120],
+    [140, 230, 220],
+  ];
+  let h = 0;
+  for (let i = 0; i < hex.length; i += 2) h = (h * 31 + parseInt(hex.substr(i, 2), 16)) | 0;
+  const c = palette[Math.abs(h) % palette.length];
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+
+interface RowInfo {
+  id: string;
+  name: string;
+  phase: number;
+  ballState: number;
+  strokes: number;
+  total: number;
+  connected: boolean;
+  mine: boolean;
+}
+
+function rowInfo(p: PlayerRow): RowInfo {
+  return {
+    id: pid(p),
+    name: p.name,
+    phase: p.phase,
+    ballState: p.ballState,
+    strokes: p.strokes,
+    total: p.totalStrokes,
+    connected: p.connected,
+    mine: p.phase !== undefined && isMine(p),
+  };
+}
+
+function sortedInfos(): RowInfo[] {
+  const infos = Array.from(playerRows.values()).map(rowInfo);
+  const inRound = round.phase === 2;
+  infos.sort((a, b) => {
+    const aActive = a.phase === 1;
+    const bActive = b.phase === 1;
+    if (inRound) {
+      // final standings: in-round players by total, spectators last
+      const aFin = a.phase === 2 ? 0 : 1;
+      const bFin = b.phase === 2 ? 0 : 1;
+      if (aFin !== bFin) return aFin - bFin;
+      return a.total - b.total || a.name.localeCompare(b.name);
+    }
+    // live scoreboard: holed first (by total), then rolling/ready (by strokes)
+    const aHoled = a.ballState === 2 ? 0 : 1;
+    const bHoled = b.ballState === 2 ? 0 : 1;
+    if (aHoled !== bHoled) return aHoled - bHoled;
+    if (aActive !== bActive) return aActive ? -1 : 1;
+    const key = aHoled === 0 ? a.total : a.strokes;
+    const key2 = bHoled === 0 ? b.total : b.strokes;
+    return key - key2 || a.name.localeCompare(b.name);
+  });
+  return infos;
+}
+
+function updatePanels(): void {
+  const me = myRow();
+  // lobby
+  const showLobby = me !== null && me.phase === 0 && round.phase !== 2;
+  lobbyEl.style.display = showLobby ? "flex" : "none";
+  if (showLobby) {
+    lobbyCount.textContent = `${playerRows.size}/10 golfers`;
+    const rows = sortedInfos();
+    lobbyPlayers.innerHTML = rows
+      .map(
+        (r) =>
+          `<div class="lp${r.mine ? " me" : ""}${r.connected ? "" : " away"}">
+             <span class="dot" style="background:${ballColor(r.id)}"></span>
+             <span class="nm">${r.name}</span>
+             <span class="ch">${playerChoiceText(r.id)}</span>
+           </div>`,
+      )
+      .join("");
+    const choice = me.courseChoice;
+    pick8.classList.toggle("active", choice === 0);
+    pick16.classList.toggle("active", choice === 1);
+    if (round.phase === 0) {
+      lobbyStart.disabled = false;
+      lobbyStart.textContent = `START MATCH — ${majorityHoles()} holes (majority choice)`;
+      lobbyNote.textContent = "Everyone plays the same holes at the same time. Anyone can start; tie on 8/16 goes to 8.";
+    } else {
+      lobbyStart.disabled = true;
+      lobbyStart.textContent = "ROUND IN PROGRESS — SPECTATING";
+      lobbyNote.textContent = "You joined mid-round. Watch the live scoreboard; join the next round after it's over.";
+    }
+  }
+  // scoreboard
+  const showBoard = me !== null && round.phase >= 1;
+  scoreboardEl.style.display = showBoard ? "block" : "none";
+  if (showBoard) {
+    scoreboardTitle.textContent = round.phase === 2 ? `FINAL — ${round.holes} holes` : `HOLE ${round.holeIdx + 1} / ${round.holes}`;
+    scoreboardRows.innerHTML = sortedInfos()
+      .map(
+        (r) =>
+          `<div class="sr${r.mine ? " me" : ""}${r.connected ? "" : " away"}">
+             <span class="nm">${r.name}${r.mine ? " (you)" : ""}${r.connected ? "" : " · away"}</span>
+             <span class="num">${round.phase === 2 ? r.total : r.ballState === 2 ? r.total : r.strokes}</span>
+             <span class="num dim">${round.phase === 2 ? "" : r.ballState === 2 ? "✓ in" : r.phase === 0 ? "lobby" : ""}</span>
+           </div>`,
+      )
+      .join("");
+  }
+  // finished panel
+  finishedEl.style.display = round.phase === 2 ? "flex" : "none";
+  if (round.phase === 2) {
+    const infos = sortedInfos();
+    finishedRows.innerHTML = infos
+      .map(
+        (r, i) =>
+          `<div class="fr${r.mine ? " me" : ""}">
+             <span class="rank">${r.phase === 2 ? i + 1 : "–"}</span>
+             <span class="nm">${r.name}${r.mine ? " (you)" : ""}</span>
+             <span class="num">${r.phase === 2 ? `${r.total} strokes` : "spectated"}</span>
+           </div>`,
+      )
+      .join("");
+  }
+  // chip: my status during a live round
+  if (me && round.phase === 1) {
+    if (me.ballState === 2) chip.textContent = "IN! — spectating until everyone's in the cup";
+    else if (me.phase === 0) chip.textContent = "spectating — round in progress";
+    else chip.textContent = "";
+    chip.style.display = chip.textContent ? "block" : "none";
+  } else {
+    chip.style.display = "none";
+  }
+}
+
+function playerChoiceText(id: string): string {
+  const p = playerRows.get(id);
+  if (!p) return "";
+  return p.phase === 0 ? (p.courseChoice === 1 ? "16 holes" : "8 holes") : "in round";
+}
+
+nameInput.value = localStorage.getItem(LS_NAME) || "golfer-" + Math.floor(Math.random() * 900 + 100);
 if (savedIdentityHex)
   setOverlayMsg(`Returning as ${nameInput.value || "your last handle"} — your ball may still be out there.`);
 
@@ -312,15 +518,13 @@ function launch(): void {
 nameInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") launch();
 });
-(document.getElementById("retee-btn") as HTMLButtonElement).onclick = () => {
-  banner.classList.remove("show");
-  void sendRetee();
-};
+pick8.onclick = () => void sendPickCourse(8);
+pick16.onclick = () => void sendPickCourse(16);
+lobbyStart.onclick = () => void sendStart();
+(document.getElementById("lobby-leave") as HTMLButtonElement).onclick = () => void sendToLobby();
+(document.getElementById("to-lobby") as HTMLButtonElement).onclick = () => void sendToLobby();
 window.addEventListener("keydown", (e) => {
-  if (e.key === "r" || e.key === "R") {
-    banner.classList.remove("show");
-    void sendRetee();
-  }
+  if (e.key === "r" || e.key === "R") void sendRetee();
 });
 
 // ---------------------------------------------------------------------------
@@ -334,13 +538,18 @@ function toWorld(sx: number, sy: number): { x: number; y: number } {
   return { x: (sx - view.ox) / view.scale, y: (sy - view.oy) / view.scale };
 }
 
+function canAim(): boolean {
+  const me = myRow();
+  return me !== null && me.phase === 1 && myBall.state === 0 && hole !== null;
+}
+
 canvas.addEventListener("pointerdown", (e: PointerEvent) => {
   if (e.button !== 0) return;
   const w = toWorld(e.clientX, e.clientY);
   pointer.x = w.x;
   pointer.y = w.y;
   pointer.down = true;
-  if (meId !== null && myState.state === 0 && myState.ball) {
+  if (canAim() && myBall.ball) {
     aiming = true;
     canvas.setPointerCapture(e.pointerId);
   }
@@ -350,11 +559,11 @@ canvas.addEventListener("pointermove", (e: PointerEvent) => {
   pointer.x = w.x;
   pointer.y = w.y;
 });
-canvas.addEventListener("pointerup", (e: PointerEvent) => {
+canvas.addEventListener("pointerup", () => {
   pointer.down = false;
   if (!aiming) return;
   aiming = false;
-  if (lastAim && lastAim.power >= MIN_SHOT && myState.state === 0) {
+  if (lastAim && lastAim.power >= MIN_SHOT && canAim()) {
     void sendHit(lastAim.dx, lastAim.dy, lastAim.power);
   }
   lastAim = null;
@@ -392,41 +601,12 @@ function sy(y: number): number {
   return y * view.scale + view.oy;
 }
 
-const BALL_COLORS: Array<[number, number, number]> = [
-  [255, 150, 120],
-  [120, 200, 255],
-  [170, 230, 130],
-  [230, 180, 250],
-  [250, 220, 120],
-  [140, 230, 220],
-];
-function playerColor(hex: string): string {
-  let h = 0;
-  for (let i = 0; i < hex.length; i += 2) {
-    h = (h * 31 + parseInt(hex.substr(i, 2), 16)) | 0;
-  }
-  const c = BALL_COLORS[Math.abs(h) % BALL_COLORS.length];
-  return `rgb(${c[0]},${c[1]},${c[2]})`;
-}
-
-function drawWall(w: Wall): void {
-  const x = sx(w.x0);
-  const y = sy(w.y0);
-  const ww = (w.x1 - w.x0) * view.scale;
-  const wh = (w.y1 - w.y0) * view.scale;
-  ctx.fillStyle = "#2c3e50";
-  ctx.fillRect(x, y, ww, wh);
-  ctx.strokeStyle = "rgba(160,190,230,0.5)";
-  ctx.lineWidth = 2;
-  ctx.strokeRect(x + 1, y + 1, ww - 2, wh - 2);
-}
-
-function drawPlanet(p: Planet, gmult: number): void {
+function drawPlanet(p: { x: number; y: number; r: number }, gmult: number): void {
   const x = sx(p.x);
   const y = sy(p.y);
   const r = p.r * view.scale;
   // gravity well glow — bright while a shot's gravity is active
-  const glow = 0.10 + 0.5 * gmult;
+  const glow = 0.1 + 0.5 * gmult;
   const wellR = r * 2.6;
   const gwell = ctx.createRadialGradient(x, y, r * 0.5, x, y, wellR);
   gwell.addColorStop(0, `rgba(120,200,255,${glow * 0.55})`);
@@ -435,7 +615,6 @@ function drawPlanet(p: Planet, gmult: number): void {
   ctx.beginPath();
   ctx.arc(x, y, wellR, 0, Math.PI * 2);
   ctx.fill();
-  // body
   const g = ctx.createRadialGradient(x - r * 0.35, y - r * 0.35, r * 0.1, x, y, r);
   g.addColorStop(0, "#9fd7ff");
   g.addColorStop(0.6, "#3f7fbf");
@@ -449,16 +628,14 @@ function drawPlanet(p: Planet, gmult: number): void {
   ctx.stroke();
 }
 
-function drawHole(): void {
-  const x = sx(HOLE_X);
-  const y = sy(HOLE_Y);
+function drawCup(cup: Vec2): void {
+  const x = sx(cup.x);
+  const y = sy(cup.y);
   const r = HOLE_R * view.scale;
-  // green rim
   ctx.fillStyle = "rgba(120,220,150,0.35)";
   ctx.beginPath();
   ctx.arc(x, y, r * 1.5, 0, Math.PI * 2);
   ctx.fill();
-  // cup
   const g = ctx.createRadialGradient(x, y, r * 0.2, x, y, r);
   g.addColorStop(0, "#000000");
   g.addColorStop(1, "#101c14");
@@ -469,7 +646,6 @@ function drawHole(): void {
   ctx.strokeStyle = "rgba(220,240,255,0.6)";
   ctx.lineWidth = 1.5;
   ctx.stroke();
-  // flag
   ctx.strokeStyle = "rgba(230,240,255,0.8)";
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -490,7 +666,6 @@ function drawBall(x: number, y: number, color: string, label: string, ghost: boo
   const py = sy(y);
   const r = BALL_R * view.scale;
   if (ghost) ctx.globalAlpha = 0.4;
-  // shadow
   ctx.fillStyle = "rgba(0,0,0,0.35)";
   ctx.beginPath();
   ctx.ellipse(px + 2, py + 3, r, r * 0.7, 0, 0, Math.PI * 2);
@@ -512,14 +687,14 @@ function drawBall(x: number, y: number, color: string, label: string, ghost: boo
   }
 }
 
-function drawTee(): void {
-  const x = sx(TEE_X);
-  const y = sy(TEE_Y);
+function drawTeeMark(tee: Vec2): void {
+  const x = sx(tee.x);
+  const y = sy(tee.y);
   ctx.strokeStyle = "rgba(220,240,255,0.4)";
   ctx.lineWidth = 1.5;
   ctx.setLineDash([4, 4]);
   ctx.beginPath();
-  ctx.arc(x, y, 22 * view.scale, 0, Math.PI * 2);
+  ctx.arc(x, y, 26 * view.scale, 0, Math.PI * 2);
   ctx.stroke();
   ctx.setLineDash([]);
 }
@@ -531,9 +706,8 @@ function interp<T extends { x: number; y: number }>(s: Snap<T>, at: number): T {
 }
 
 function drawAim(): void {
-  if (!aiming || !myState.ball || myState.state !== 0) return;
-  const b = myState.ball;
-  // recompute the current aim (slingshot: pull back, ball goes the other way)
+  if (!aiming || !canAim() || !myBall.ball || !hole) return;
+  const b = myBall.ball;
   const ax = b.x - pointer.x;
   const ay = b.y - pointer.y;
   const alen = Math.hypot(ax, ay);
@@ -547,7 +721,7 @@ function drawAim(): void {
   lastAim = { dx, dy, power };
 
   const tHalf = estimateTHalf(power);
-  const sim = simulateShot(b.x, b.y, dx * power, dy * power, tHalf, 8, 4);
+  const sim = simulateShot(b.x, b.y, dx * power, dy * power, tHalf, hole, 8, 4);
 
   // pull band
   ctx.strokeStyle = "rgba(255,255,255,0.25)";
@@ -587,79 +761,96 @@ function drawAim(): void {
   ctx.textAlign = "center";
   ctx.fillText("gravity fades", sx(fadePt.x), sy(fadePt.y) - 12);
 
-  // power meter near the ball
+  // power meter + straight-drive hint
   const px = sx(b.x);
   const py = sy(b.y);
   const frac = power / MAX_SHOT;
   ctx.fillStyle = "rgba(10,16,26,0.7)";
-  ctx.fillRect(px - 30, py - 46, 60, 8);
+  ctx.fillRect(px - 34, py - 46, 68, 8);
   ctx.fillStyle = frac > 0.85 ? "#ff8080" : frac > 0.5 ? "#ffc060" : "#90e0a0";
-  ctx.fillRect(px - 29, py - 45, 58 * frac, 6);
+  ctx.fillRect(px - 33, py - 45, 66 * frac, 6);
   ctx.fillStyle = "rgba(230,240,255,0.9)";
   ctx.font = "10px monospace";
-  ctx.fillText(`${Math.round(power)} px/s`, px, py - 52);
+  const straight = straightDrivePower(Math.hypot(hole.cup.x - b.x, hole.cup.y - b.y));
+  ctx.fillText(`${Math.round(power)} px/s  ·  straight: ${Math.round(straight)}`, px, py - 52);
 }
 
 function draw(): void {
   const now = performance.now();
   const renderT = now - INTERP_DELAY;
 
-  // backdrop
   ctx.fillStyle = "#05070d";
   ctx.fillRect(0, 0, W, H);
 
   // course surface
   ctx.fillStyle = "#0b2417";
   ctx.fillRect(sx(0), sy(0), WORLD_W * view.scale, WORLD_H * view.scale);
-  // mowing stripes
   ctx.fillStyle = "rgba(255,255,255,0.025)";
   for (let i = 0; i < WORLD_W; i += 200) {
     ctx.fillRect(sx(i), sy(0), 100 * view.scale, WORLD_H * view.scale);
   }
-  // outer boundary
   ctx.strokeStyle = "#3d5a80";
   ctx.lineWidth = 6;
   ctx.strokeRect(sx(0), sy(0), WORLD_W * view.scale, WORLD_H * view.scale);
 
-  // gravity multiplier for my ball (drives the planet glow)
+  const me = myRow();
   const myGmult =
-    myState.state === 1 && myState.ball ? Math.max(0, 1 - myState.ball.age / myState.ball.tHalf) : 0;
+    me && me.phase === 1 && myBall.state === 1 && myBall.ball
+      ? Math.max(0, 1 - myBall.ball.age / myBall.ball.tHalf)
+      : 0;
 
-  for (const w of WALLS) drawWall(w);
-  for (const p of PLANETS) drawPlanet(p, myGmult);
-  drawTee();
-  drawHole();
+  if (hole) {
+    for (const p of hole.planets) drawPlanet(p, myGmult);
+    drawTeeMark(hole.tee);
+    drawCup(hole.cup);
+  } else {
+    // lobby: no course yet
+    drawTeeMark({ x: DEFAULT_TEE_X, y: DEFAULT_TEE_Y });
+    ctx.fillStyle = "rgba(200,225,205,0.5)";
+    ctx.font = "16px monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("the course is generated when the round starts", sx(WORLD_W / 2), sy(WORLD_H / 2));
+  }
 
   // other players (interpolated)
-  for (const [id, s] of players) {
+  for (const [id, s] of snaps) {
     const p = interp(s, renderT);
-    const label = p.connected ? `${p.name} · ${p.strokes}` : `${p.name} · ${p.strokes} (away)`;
-    drawBall(p.x, p.y, playerColor(id), label, !p.connected);
+    const label = `${p.name} · ${p.ballState === 2 ? "in" : p.strokes}${p.connected ? "" : " (away)"}`;
+    drawBall(p.x, p.y, ballColor(id), label, !p.connected);
   }
 
   // my ball
-  if (meId !== null && myState.ball) {
-    const b = myState.ball;
-    if (myState.state === 2) {
-      // ball sitting in the cup
-      drawBall(HOLE_X, HOLE_Y, "#ffffff", "you", false);
+  if (me && myBall.ball) {
+    const b = myBall.ball;
+    if (me.phase === 1 && myBall.state === 2 && hole) {
+      drawBall(hole.cup.x, hole.cup.y, "#ffffff", `${me.name} · in`, false);
     } else {
-      drawBall(b.x, b.y, "#ffffff", myName ? `you · ${myState.strokes}` : "you", false);
+      drawBall(b.x, b.y, "#ffffff", `${me.name} (you)`, false);
     }
   }
 
   drawAim();
 
   // HUD
-  if (meId !== null) {
-    const stateTxt =
-      myState.state === 0 ? "ready — drag to aim" :
-      myState.state === 1 && myState.ball ? `rolling · gravity ${Math.round(myGmult * 100)}%` :
-      "holed!";
-    hud.textContent =
-      `${myName}  ·  strokes ${myState.strokes}  ·  par ${PAR}\n` +
-      `${stateTxt}  ·  ${players.size + 1} on course  ·  ${Math.round(fpsSmooth)} fps\n` +
-      `R = re-tee`;
+  if (me) {
+    let lines = "";
+    if (me.phase === 1 && hole) {
+      const par = holePar(hole);
+      lines += `Hole ${round.holeIdx + 1}/${round.holes} · par ${par}\n`;
+      const stateTxt =
+        myBall.state === 0
+          ? "ready — drag to aim"
+          : myBall.state === 1
+            ? `rolling · gravity ${Math.round(myGmult * 100)}%`
+            : "in the cup — spectating";
+      lines += `${stateTxt}\n`;
+    } else if (me.phase === 0) {
+      lines += round.phase === 1 ? "spectating a live round\n" : "in the lobby\n";
+    } else {
+      lines += "round over\n";
+    }
+    lines += `strokes ${me.strokes} · total ${me.totalStrokes} · R = re-tee`;
+    hud.textContent = lines;
   } else {
     hud.textContent = "";
   }
@@ -679,24 +870,25 @@ function frame(): void {
   if (dt > 0.1) dt = 0.1;
   fpsSmooth += ((1 / Math.max(dt, 1e-4)) - fpsSmooth) * 0.05;
 
-  if (meId !== null && myState.state === 1 && myState.ball) {
+  const me = myRow();
+  if (me && me.phase === 1 && myBall.state === 1 && myBall.ball && hole) {
     // advance the exact number of server-sized substeps that fit in dt
     acc += dt;
     let steps = 0;
     while (acc >= SUB_DT && steps < 64) {
       acc -= SUB_DT;
       steps++;
-      const holed = fullSubstep(myState.ball);
+      const holed = fullSubstep(myBall.ball, hole);
       if (holed) {
-        setMyState(2);
+        myBall.state = 2;
         break;
       }
-      const b = myState.ball;
+      const b = myBall.ball;
       const gmult = Math.max(0, 1 - b.age / b.tHalf);
       if (gmult <= 0 && speed(b) < SETTLE_EPS) {
         b.vx = 0;
         b.vy = 0;
-        setMyState(0);
+        myBall.state = 0;
         acc = 0;
         break;
       }
@@ -717,5 +909,7 @@ function frame(): void {
 db.db.player.onInsert((_ctx, p) => applyPlayerInsert(p));
 db.db.player.onUpdate((_ctx, _old, p) => applyPlayerUpdate(_old, p));
 db.db.player.onDelete((_ctx, row) => applyPlayerDelete(row));
+db.db.round.onInsert((_ctx, r) => applyRound(r as RoundRow));
+db.db.round.onUpdate((_ctx, _old, r) => applyRound(r as RoundRow));
 
 requestAnimationFrame(frame);

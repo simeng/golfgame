@@ -138,7 +138,9 @@ Fading gravity, exactly as specified by the player:
 Tuning intent:
 
 - `FRICTION = 120`: full-power shot (700 px/s) stops in ~5.8 s / ~2041 px.
-- `G_GOLF = 500`, planet `mass ∝ r²`: a 700 px/s ball grazing a 50 px planet at
+- `G_GOLF = 3000` (tuned 2026-09-27: 500 was a visual non-effect — drives
+  bent ~30 px; at 3000 they bend ~170 px and the peak pull reaches ~4×
+  friction), planet `mass ∝ r²`: a 700 px/s ball grazing a 50 px planet at
   100 px gets pulled hard early in the shot; near `t_half` the same flyby does
   almost nothing.
 - `REST = 0.86` wall & planet bounce.

@@ -15,7 +15,7 @@ export const DEFAULT_TEE_Y = 450.0;
 // --- physics constants (mirror lib.rs) -------------------------------------
 
 export const FRICTION = 120.0; // constant rolling deceleration, px/s^2
-const G_GOLF = 500.0;
+const G_GOLF = 3000.0;
 const MIN_D = 26.0;
 const REST = 0.86;
 export const MAX_SHOT = 700.0;

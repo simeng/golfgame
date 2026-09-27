@@ -220,7 +220,9 @@ async function waitFind(conn: ReturnType<typeof makeConn>, pred: (r: ReturnType<
   else fail(`client sim diverged from server by ${d.toFixed(3)}px — mirror broken`);
 
   const distCup = Math.hypot(settledA.x - hole0.cup.x, settledA.y - hole0.cup.y);
-  if (settledA.ballState === 2 || distCup < 200) pass(`straight drive reached the cup area (${distCup.toFixed(0)}px or holed)`);
+  // with strong fading gravity a straight drive can legitimately end 200-400px
+  // off the cup line (that's the whole point of the mechanic)
+  if (settledA.ballState === 2 || distCup < 500) pass(`straight drive reached the cup area (${distCup.toFixed(0)}px or holed)`);
   else fail(`straight drive fell short (${distCup.toFixed(0)}px from cup)`);
 }
 
